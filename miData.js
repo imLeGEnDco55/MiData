@@ -1,1 +1,516 @@
-/**\n * MiData \u2014 MD Reader Engine\n * Renders .md files as a beautiful SPA on GitHub Pages\n * with cross-file navigation, sidebar, and audio player.\n *\n * Usage: Include in your repo's index.html with:\n *   <div id=\"miData\" data-repo=\"user/repo\"></div>\n *   <script src=\"miData.js\"></script>\n */\n\n(function () {\n  'use strict';\n\n  // \u2500\u2500\u2500 Config \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const GITHUB_API = 'https://api.github.com';\n  const RAW_BASE = 'https://raw.githubusercontent.com';\n\n  // \u2500\u2500\u2500 Marked.js Inline (minimal, no deps) \u2500\u2500\u2500\n  let markedLoaded = false;\n\n  function loadMarked() {\n    return new Promise((resolve, reject) => {\n      if (markedLoaded && window.marked) return resolve();\n      const s = document.createElement('script');\n      s.src = 'https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js';\n      s.onload = () => { markedLoaded = true; resolve(); };\n      s.onerror = reject;\n      document.head.appendChild(s);\n    });\n  }\n\n  // \u2500\u2500\u2500 State \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  let state = {\n    repo: '',\n    owner: '',\n    branch: 'main',\n    tree: [],\n    currentFile: '',\n    title: '',\n    sidebarOpen: false,\n    audioInstances: [],\n  };\n\n  // \u2500\u2500\u2500 Init \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  async function init() {\n    const root = document.getElementById('miData');\n    if (!root) return console.error('[MiData] #miData element not found');\n\n    const dataRepo = root.dataset.repo;\n    if (!dataRepo) return console.error('[MiData] data-repo attribute required');\n\n    const [owner, repo] = dataRepo.split('/');\n    state.owner = owner;\n    state.repo = repo;\n    state.branch = root.dataset.branch || 'main';\n    state.title = root.dataset.title || repo;\n\n    // Build shell\n    root.innerHTML = buildShell();\n\n    // Load marked.js\n    await loadMarked();\n    configureMarked();\n\n    // Fetch repo tree\n    await fetchTree();\n\n    // Build sidebar\n    renderSidebar();\n\n    // Route\n    handleRoute();\n    window.addEventListener('hashchange', handleRoute);\n\n    // Mobile toggle\n    setupMobileToggle();\n  }\n\n  // \u2500\u2500\u2500 Shell HTML \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function buildShell() {\n    return `\n      <button class=\"md-menu-toggle\" id=\"mdMenuToggle\" aria-label=\"Menu\">\u2630</button>\n      <div class=\"md-overlay\" id=\"mdOverlay\"></div>\n      <aside class=\"md-sidebar\" id=\"mdSidebar\">\n        <div class=\"md-sidebar-header\">\n          <a href=\"#/\" class=\"md-sidebar-title\">\n            <span class=\"logo\">\ud83d\udcc4</span>\n            <span>${esc(state.title)}</span>\n          </a>\n        </div>\n        <nav class=\"md-nav\" id=\"mdNav\"></nav>\n        <div class=\"md-toc\" id=\"mdToc\"></div>\n      </aside>\n      <main class=\"md-content\">\n        <div class=\"md-content-inner\">\n          <div class=\"md-breadcrumb\" id=\"mdBreadcrumb\"></div>\n          <article class=\"md-body\" id=\"mdBody\">\n            <div class=\"md-loading\"><div class=\"md-spinner\"></div> Loading...</div>\n          </article>\n          <footer class=\"md-footer\">\n            Powered by <a href=\"https://github.com/imLeGEnDco55/MiData\" target=\"_blank\">MiData</a>\n          </footer>\n        </div>\n      </main>\n    `;\n  }\n\n  // \u2500\u2500\u2500 Configure Marked \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function configureMarked() {\n    if (!window.marked) return;\n\n    const renderer = new marked.Renderer();\n\n    // Custom link renderer \u2014 detect audio files\n    const originalLink = renderer.link;\n    renderer.link = function ({ href, title, text }) {\n      // Check if it's an audio file\n      if (href && /\\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(href)) {\n        const audioUrl = resolveUrl(href);\n        const displayName = text || href.split('/').pop();\n        return buildAudioPlayerHTML(audioUrl, displayName);\n      }\n\n      // Check if it's a .md link (cross-file navigation)\n      if (href && /\\.md$/i.test(href) && !href.startsWith('http')) {\n        const hashPath = href.startsWith('/') ? href : '/' + href;\n        return `<a href=\"#${hashPath}\">${text}</a>`;\n      }\n\n      // External links\n      const targetAttr = href && href.startsWith('http') ? ' target=\"_blank\" rel=\"noopener\"' : '';\n      const titleAttr = title ? ` title=\"${esc(title)}\"` : '';\n      return `<a href=\"${href}\"${titleAttr}${targetAttr}>${text}</a>`;\n    };\n\n    // Checkbox support for task lists\n    renderer.listitem = function ({ text }) {\n      if (text.startsWith('<input')) {\n        return `<li style=\"list-style:none;margin-left:-1.5em\">${text}</li>\\n`;\n      }\n      return `<li>${text}</li>\\n`;\n    };\n\n    marked.setOptions({\n      renderer: renderer,\n      breaks: true,\n      gfm: true,\n    });\n  }\n\n  // \u2500\u2500\u2500 Fetch Repo Tree \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  async function fetchTree() {\n    try {\n      const resp = await fetch(`${GITHUB_API}/repos/${state.owner}/${state.repo}/git/trees/${state.branch}?recursive=1`);\n      if (!resp.ok) throw new Error(`GitHub API: ${resp.status}`);\n      const data = await resp.json();\n      state.tree = data.tree || [];\n    } catch (e) {\n      console.error('[MiData] Failed to fetch tree:', e);\n      state.tree = [];\n    }\n  }\n\n  // \u2500\u2500\u2500 Render Sidebar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function renderSidebar() {\n    const nav = document.getElementById('mdNav');\n    if (!nav) return;\n\n    const mdFiles = state.tree.filter(f => f.type === 'blob' && /\\.md$/i.test(f.path));\n    const audioFiles = state.tree.filter(f => f.type === 'blob' && /\\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(f.path));\n\n    const structure = {};\n    const rootFiles = [];\n\n    mdFiles.forEach(f => {\n      const parts = f.path.split('/');\n      if (parts.length === 1) {\n        rootFiles.push(f);\n      } else {\n        const folder = parts.slice(0, -1).join('/');\n        if (!structure[folder]) structure[folder] = [];\n        structure[folder].push(f);\n      }\n    });\n\n    const audioFolders = {};\n    audioFiles.forEach(f => {\n      const parts = f.path.split('/');\n      const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : 'audio';\n      if (!audioFolders[folder]) audioFolders[folder] = [];\n      audioFolders[folder].push(f);\n    });\n\n    let html = '';\n\n    // Root files\n    if (rootFiles.length) {\n      html += '<div class=\"md-nav-root\">';\n      rootFiles.forEach(f => {\n        const name = f.path.replace('.md', '');\n        const displayName = name === 'README' ? '\ud83c\udfe0 Home' : name;\n        html += `<div class=\"md-nav-item\">\n          <a class=\"md-nav-link\" href=\"#/${f.path}\" data-path=\"${f.path}\">\n            <span class=\"icon\">\ud83d\udcdd</span> ${esc(displayName)}\n          </a>\n        </div>`;\n      });\n      html += '</div>';\n    }\n\n    // Folder sections\n    Object.keys(structure).sort().forEach(folder => {\n      const files = structure[folder];\n      html += `\n        <div class=\"md-nav-section\">\n          <div class=\"md-nav-folder\" data-folder=\"${folder}\">\ud83d\udcc1 ${esc(folder)}</div>\n          <div class=\"md-nav-items\">\n            ${files.map(f => {\n              const name = f.path.split('/').pop().replace('.md', '');\n              return `<div class=\"md-nav-item\">\n                <a class=\"md-nav-link\" href=\"#/${f.path}\" data-path=\"${f.path}\">\n                  <span class=\"icon\">\ud83d\udcdd</span> ${esc(name)}\n                </a>\n              </div>`;\n            }).join('')}\n          </div>\n        </div>`;\n    });\n\n    // Audio folders\n    Object.keys(audioFolders).sort().forEach(folder => {\n      const files = audioFolders[folder];\n      html += `\n        <div class=\"md-nav-section\">\n          <div class=\"md-nav-folder\" data-folder=\"${folder}\">\ud83c\udfb5 ${esc(folder)}</div>\n          <div class=\"md-nav-items\">\n            ${files.map(f => {\n              const name = f.path.split('/').pop();\n              return `<div class=\"md-nav-item\">\n                <a class=\"md-nav-link md-audio-sidebar-link\" href=\"#\" data-audio=\"${f.path}\">\n                  <span class=\"icon\">\ud83c\udfb5</span> ${esc(name)}\n                </a>\n              </div>`;\n            }).join('')}\n          </div>\n        </div>`;\n    });\n\n    nav.innerHTML = html;\n\n    // Folder toggle\n    nav.querySelectorAll('.md-nav-folder').forEach(el => {\n      el.addEventListener('click', () => el.classList.toggle('open'));\n    });\n\n    // Audio sidebar links\n    nav.querySelectorAll('.md-audio-sidebar-link').forEach(el => {\n      el.addEventListener('click', (e) => {\n        e.preventDefault();\n        const path = el.dataset.audio;\n        const url = `${RAW_BASE}/${state.owner}/${state.repo}/${state.branch}/${path}`;\n        const name = path.split('/').pop();\n        playAudioInline(url, name);\n      });\n    });\n  }\n\n  // \u2500\u2500\u2500 Routing \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function handleRoute() {\n    let path = location.hash.replace('#/', '').replace('#', '');\n    if (!path) path = 'README.md';\n    if (!path.endsWith('.md')) path += '.md';\n\n    loadFile(path);\n  }\n\n  // \u2500\u2500\u2500 Load File \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  async function loadFile(path) {\n    const body = document.getElementById('mdBody');\n    const breadcrumb = document.getElementById('mdBreadcrumb');\n    if (!body) return;\n\n    // Stop any playing audio\n    stopAllAudio();\n\n    state.currentFile = path;\n\n    // Loading state\n    body.innerHTML = '<div class=\"md-loading\"><div class=\"md-spinner\"></div> Loading...</div>';\n\n    // Breadcrumb\n    if (breadcrumb) {\n      const parts = path.split('/');\n      let crumbs = '<a href=\"#/\">\ud83c\udfe0</a>';\n      parts.forEach((p, i) => {\n        crumbs += ' <span class=\"separator\">/</span> ';\n        if (i === parts.length - 1) {\n          crumbs += `<span>${esc(p.replace('.md', ''))}</span>`;\n        } else {\n          crumbs += `<a href=\"#/${parts.slice(0, i + 1).join('/')}\">${esc(p)}</a>`;\n        }\n      });\n      breadcrumb.innerHTML = crumbs;\n    }\n\n    // Update active sidebar link\n    document.querySelectorAll('.md-nav-link').forEach(el => {\n      el.classList.toggle('active', el.dataset.path === path);\n      // Auto-open parent folder\n      if (el.dataset.path === path) {\n        const folder = el.closest('.md-nav-section')?.querySelector('.md-nav-folder');\n        if (folder) folder.classList.add('open');\n      }\n    });\n\n    // Fetch file\n    try {\n      const url = `${RAW_BASE}/${state.owner}/${state.repo}/${state.branch}/${path}`;\n      const resp = await fetch(url);\n      if (!resp.ok) throw new Error(`${resp.status} \u2014 File not found`);\n      let md = await resp.text();\n\n      // Render markdown\n      const html = marked.parse(md);\n      body.innerHTML = html;\n\n      // Build TOC\n      buildTOC();\n\n      // Scroll to top\n      window.scrollTo(0, 0);\n\n      // Close mobile sidebar\n      closeMobileSidebar();\n\n    } catch (e) {\n      body.innerHTML = `<div class=\"md-error\">\n        <p>\ud83d\udcc4 Could not load file</p>\n        <code>${esc(path)}</code>\n        <p style=\"margin-top:12px;font-size:0.8rem\">${esc(e.message)}</p>\n      </div>`;\n    }\n  }\n\n  // \u2500\u2500\u2500 Build TOC (in-page headers) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function buildTOC() {\n    const tocEl = document.getElementById('mdToc');\n    const body = document.getElementById('mdBody');\n    if (!tocEl || !body) return;\n\n    const headings = body.querySelectorAll('h2, h3, h4');\n    if (headings.length === 0) {\n      tocEl.innerHTML = '';\n      return;\n    }\n\n    let html = '<div class=\"md-toc-title\">En esta p\u00e1gina</div><ul class=\"md-toc-list\">';\n    headings.forEach((h, i) => {\n      const id = `heading-${i}`;\n      h.id = id;\n      const depth = parseInt(h.tagName.charAt(1));\n      const text = h.textContent;\n      html += `<li><a class=\"md-toc-link depth-${depth}\" href=\"#${id}\" onclick=\"event.preventDefault(); document.getElementById('${id}').scrollIntoView({behavior:'smooth'})\">${esc(text)}</a></li>`;\n    });\n    html += '</ul>';\n    tocEl.innerHTML = html;\n  }\n\n  // \u2500\u2500\u2500 Audio Player HTML \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function buildAudioPlayerHTML(url, name) {\n    const id = 'audio-' + Math.random().toString(36).substr(2, 9);\n    return `\n      <div class=\"md-audio-player\" data-audio-id=\"${id}\">\n        <button class=\"md-audio-play-btn\" onclick=\"MiData.toggleAudio('${id}', '${url}')\" aria-label=\"Play\">\u25b6</button>\n        <div class=\"md-audio-info\">\n          <div class=\"md-audio-title\">${esc(name)}</div>\n          <div class=\"md-audio-progress-wrap\">\n            <div class=\"md-audio-progress\" onclick=\"MiData.seekAudio(event, '${id}')\">\n              <div class=\"md-audio-progress-bar\" id=\"${id}-bar\"></div>\n            </div>\n            <span class=\"md-audio-time\" id=\"${id}-time\">0:00 / 0:00</span>\n          </div>\n        </div>\n      </div>`;\n  }\n\n  // \u2500\u2500\u2500 Audio Control \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  const audioElements = {};\n\n  function toggleAudio(id, url) {\n    if (audioElements[id]) {\n      const audio = audioElements[id];\n      if (audio.paused) {\n        Object.keys(audioElements).forEach(k => {\n          if (k !== id && !audioElements[k].paused) {\n            audioElements[k].pause();\n            updatePlayBtn(k, false);\n          }\n        });\n        audio.play();\n        updatePlayBtn(id, true);\n      } else {\n        audio.pause();\n        updatePlayBtn(id, false);\n      }\n      return;\n    }\n\n    const audio = new Audio(url);\n    audioElements[id] = audio;\n\n    audio.addEventListener('timeupdate', () => {\n      const bar = document.getElementById(`${id}-bar`);\n      const timeEl = document.getElementById(`${id}-time`);\n      if (bar) bar.style.width = `${(audio.currentTime / audio.duration) * 100}%`;\n      if (timeEl) timeEl.textContent = `${fmt(audio.currentTime)} / ${fmt(audio.duration)}`;\n    });\n\n    audio.addEventListener('ended', () => {\n      updatePlayBtn(id, false);\n    });\n\n    Object.keys(audioElements).forEach(k => {\n      if (k !== id && !audioElements[k].paused) {\n        audioElements[k].pause();\n        updatePlayBtn(k, false);\n      }\n    });\n\n    audio.play();\n    updatePlayBtn(id, true);\n  }\n\n  function seekAudio(event, id) {\n    const audio = audioElements[id];\n    if (!audio) return;\n    const rect = event.currentTarget.getBoundingClientRect();\n    const pct = (event.clientX - rect.left) / rect.width;\n    audio.currentTime = pct * audio.duration;\n  }\n\n  function updatePlayBtn(id, playing) {\n    const player = document.querySelector(`[data-audio-id=\"${id}\"]`);\n    if (!player) return;\n    const btn = player.querySelector('.md-audio-play-btn');\n    if (btn) btn.textContent = playing ? '\u23f8' : '\u25b6';\n  }\n\n  function stopAllAudio() {\n    Object.keys(audioElements).forEach(k => {\n      audioElements[k].pause();\n      audioElements[k].currentTime = 0;\n    });\n  }\n\n  function playAudioInline(url, name) {\n    const body = document.getElementById('mdBody');\n    if (!body) return;\n\n    const id = 'sidebar-audio-' + Math.random().toString(36).substr(2, 9);\n    const playerHTML = buildAudioPlayerHTML(url, name);\n\n    const existing = body.querySelector('.md-sidebar-audio-player');\n    if (existing) existing.remove();\n\n    const wrapper = document.createElement('div');\n    wrapper.className = 'md-sidebar-audio-player';\n    wrapper.innerHTML = playerHTML;\n    body.insertBefore(wrapper, body.firstChild);\n\n    setTimeout(() => toggleAudio(id, url), 100);\n  }\n\n  // \u2500\u2500\u2500 Helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  function fmt(secs) {\n    if (isNaN(secs)) return '0:00';\n    const m = Math.floor(secs / 60);\n    const s = Math.floor(secs % 60);\n    return `${m}:${s.toString().padStart(2, '0')}`;\n  }\n\n  function esc(str) {\n    const div = document.createElement('div');\n    div.textContent = str;\n    return div.innerHTML;\n  }\n\n  function resolveUrl(href) {\n    if (href.startsWith('http')) return href;\n\n    const currentDir = state.currentFile.includes('/')\n      ? state.currentFile.split('/').slice(0, -1).join('/')\n      : '';\n\n    const resolved = currentDir ? `${currentDir}/${href}` : href;\n    return `${RAW_BASE}/${state.owner}/${state.repo}/${state.branch}/${resolved}`;\n  }\n\n  function closeMobileSidebar() {\n    const sidebar = document.getElementById('mdSidebar');\n    const overlay = document.getElementById('mdOverlay');\n    if (sidebar) sidebar.classList.remove('open');\n    if (overlay) overlay.classList.remove('active');\n  }\n\n  function setupMobileToggle() {\n    const toggle = document.getElementById('mdMenuToggle');\n    const sidebar = document.getElementById('mdSidebar');\n    const overlay = document.getElementById('mdOverlay');\n\n    if (toggle) {\n      toggle.addEventListener('click', () => {\n        sidebar.classList.toggle('open');\n        overlay.classList.toggle('active');\n      });\n    }\n\n    if (overlay) {\n      overlay.addEventListener('click', closeMobileSidebar);\n    }\n  }\n\n  // \u2500\u2500\u2500 Public API \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  window.MiData = {\n    init,\n    toggleAudio,\n    seekAudio,\n  };\n\n  // Auto-init on DOM ready\n  if (document.readyState === 'loading') {\n    document.addEventListener('DOMContentLoaded', init);\n  } else {\n    init();\n  }\n\n})();\n
+/**
+ * MiData — MD Reader Engine
+ * Renders .md files as a beautiful SPA on GitHub Pages
+ * with cross-file navigation, sidebar, and audio player.
+ *
+ * Usage: Include in your repo's index.html with:
+ *   <div id="miData" data-repo="user/repo"></div>
+ *   <script src="miData.js"></script>
+ */
+
+(function () {
+  'use strict';
+
+  // ─── Config ────────────────────────────────
+  const GITHUB_API = 'https://api.github.com';
+  const RAW_BASE = 'https://raw.githubusercontent.com';
+
+  // ─── Marked.js Inline (minimal, no deps) ───
+  let markedLoaded = false;
+
+  function loadMarked() {
+    return new Promise((resolve, reject) => {
+      if (markedLoaded && window.marked) return resolve();
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js';
+      s.onload = () => { markedLoaded = true; resolve(); };
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  // ─── State ─────────────────────────────────
+  let state = {
+    repo: '',
+    owner: '',
+    branch: 'main',
+    tree: [],
+    currentFile: '',
+    title: '',
+    sidebarOpen: false,
+    audioInstances: [],
+  };
+
+  // ─── Init ──────────────────────────────────
+  async function init() {
+    const root = document.getElementById('miData');
+    if (!root) return console.error('[MiData] #miData element not found');
+
+    const dataRepo = root.dataset.repo;
+    if (!dataRepo) return console.error('[MiData] data-repo attribute required');
+
+    const [owner, repo] = dataRepo.split('/');
+    state.owner = owner;
+    state.repo = repo;
+    state.branch = root.dataset.branch || 'main';
+    state.title = root.dataset.title || repo;
+
+    // Build shell
+    root.innerHTML = buildShell();
+
+    // Load marked.js
+    await loadMarked();
+    configureMarked();
+
+    // Fetch repo tree
+    await fetchTree();
+
+    // Build sidebar
+    renderSidebar();
+
+    // Route
+    handleRoute();
+    window.addEventListener('hashchange', handleRoute);
+
+    // Mobile toggle
+    setupMobileToggle();
+  }
+
+  // ─── Shell HTML ────────────────────────────
+  function buildShell() {
+    return `
+      <button class="md-menu-toggle" id="mdMenuToggle" aria-label="Menu">\u2630</button>
+      <div class="md-overlay" id="mdOverlay"></div>
+      <aside class="md-sidebar" id="mdSidebar">
+        <div class="md-sidebar-header">
+          <a href="#/" class="md-sidebar-title">
+            <span class="logo">\ud83d\udcc4</span>
+            <span>${esc(state.title)}</span>
+          </a>
+        </div>
+        <nav class="md-nav" id="mdNav"></nav>
+        <div class="md-toc" id="mdToc"></div>
+      </aside>
+      <main class="md-content">
+        <div class="md-content-inner">
+          <div class="md-breadcrumb" id="mdBreadcrumb"></div>
+          <article class="md-body" id="mdBody">
+            <div class="md-loading"><div class="md-spinner"></div> Loading...</div>
+          </article>
+          <footer class="md-footer">
+            Powered by <a href="https://github.com/imLeGEnDco55/MiData" target="_blank">MiData</a>
+          </footer>
+        </div>
+      </main>
+    `;
+  }
+
+  // ─── Configure Marked ─────────────────────
+  function configureMarked() {
+    if (!window.marked) return;
+
+    const renderer = new marked.Renderer();
+
+    // Custom link renderer — detect audio files
+    renderer.link = function ({ href, title, text }) {
+      // Check if it's an audio file
+      if (href && /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(href)) {
+        const audioUrl = resolveUrl(href);
+        const displayName = text || href.split('/').pop();
+        return buildAudioPlayerHTML(audioUrl, displayName);
+      }
+
+      // Check if it's a .md link (cross-file navigation)
+      if (href && /\.md$/i.test(href) && !href.startsWith('http')) {
+        const hashPath = href.startsWith('/') ? href : '/' + href;
+        return '<a href="#' + hashPath + '">' + text + '</a>';
+      }
+
+      // External links
+      var targetAttr = href && href.startsWith('http') ? ' target="_blank" rel="noopener"' : '';
+      var titleAttr = title ? ' title="' + esc(title) + '"' : '';
+      return '<a href="' + href + '"' + titleAttr + targetAttr + '>' + text + '</a>';
+    };
+
+    // Checkbox support for task lists
+    renderer.listitem = function ({ text }) {
+      if (text.startsWith('<input')) {
+        return '<li style="list-style:none;margin-left:-1.5em">' + text + '</li>\n';
+      }
+      return '<li>' + text + '</li>\n';
+    };
+
+    marked.setOptions({
+      renderer: renderer,
+      breaks: true,
+      gfm: true,
+    });
+  }
+
+  // ─── Fetch Repo Tree ──────────────────────
+  async function fetchTree() {
+    try {
+      const resp = await fetch(GITHUB_API + '/repos/' + state.owner + '/' + state.repo + '/git/trees/' + state.branch + '?recursive=1');
+      if (!resp.ok) throw new Error('GitHub API: ' + resp.status);
+      const data = await resp.json();
+      state.tree = data.tree || [];
+    } catch (e) {
+      console.error('[MiData] Failed to fetch tree:', e);
+      state.tree = [];
+    }
+  }
+
+  // ─── Render Sidebar ───────────────────────
+  function renderSidebar() {
+    var nav = document.getElementById('mdNav');
+    if (!nav) return;
+
+    var mdFiles = state.tree.filter(function(f) { return f.type === 'blob' && /\.md$/i.test(f.path); });
+    var audioFiles = state.tree.filter(function(f) { return f.type === 'blob' && /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(f.path); });
+
+    var structure = {};
+    var rootFiles = [];
+
+    mdFiles.forEach(function(f) {
+      var parts = f.path.split('/');
+      if (parts.length === 1) {
+        rootFiles.push(f);
+      } else {
+        var folder = parts.slice(0, -1).join('/');
+        if (!structure[folder]) structure[folder] = [];
+        structure[folder].push(f);
+      }
+    });
+
+    var audioFolders = {};
+    audioFiles.forEach(function(f) {
+      var parts = f.path.split('/');
+      var folder = parts.length > 1 ? parts.slice(0, -1).join('/') : 'audio';
+      if (!audioFolders[folder]) audioFolders[folder] = [];
+      audioFolders[folder].push(f);
+    });
+
+    var html = '';
+
+    // Root files
+    if (rootFiles.length) {
+      html += '<div class="md-nav-root">';
+      rootFiles.forEach(function(f) {
+        var name = f.path.replace('.md', '');
+        var displayName = name === 'README' ? '\ud83c\udfe0 Home' : name;
+        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">\ud83d\udcdd</span> ' + esc(displayName) + '</a></div>';
+      });
+      html += '</div>';
+    }
+
+    // Folder sections
+    Object.keys(structure).sort().forEach(function(folder) {
+      var files = structure[folder];
+      html += '<div class="md-nav-section">';
+      html += '<div class="md-nav-folder" data-folder="' + folder + '">\ud83d\udcc1 ' + esc(folder) + '</div>';
+      html += '<div class="md-nav-items">';
+      files.forEach(function(f) {
+        var name = f.path.split('/').pop().replace('.md', '');
+        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">\ud83d\udcdd</span> ' + esc(name) + '</a></div>';
+      });
+      html += '</div></div>';
+    });
+
+    // Audio folders
+    Object.keys(audioFolders).sort().forEach(function(folder) {
+      var files = audioFolders[folder];
+      html += '<div class="md-nav-section">';
+      html += '<div class="md-nav-folder" data-folder="' + folder + '">\ud83c\udfb5 ' + esc(folder) + '</div>';
+      html += '<div class="md-nav-items">';
+      files.forEach(function(f) {
+        var name = f.path.split('/').pop();
+        html += '<div class="md-nav-item"><a class="md-nav-link md-audio-sidebar-link" href="#" data-audio="' + f.path + '"><span class="icon">\ud83c\udfb5</span> ' + esc(name) + '</a></div>';
+      });
+      html += '</div></div>';
+    });
+
+    nav.innerHTML = html;
+
+    // Folder toggle
+    nav.querySelectorAll('.md-nav-folder').forEach(function(el) {
+      el.addEventListener('click', function() { el.classList.toggle('open'); });
+    });
+
+    // Audio sidebar links
+    nav.querySelectorAll('.md-audio-sidebar-link').forEach(function(el) {
+      el.addEventListener('click', function(e) {
+        e.preventDefault();
+        var path = el.dataset.audio;
+        var url = RAW_BASE + '/' + state.owner + '/' + state.repo + '/' + state.branch + '/' + path;
+        var name = path.split('/').pop();
+        playAudioInline(url, name);
+      });
+    });
+  }
+
+  // ─── Routing ──────────────────────────────
+  function handleRoute() {
+    var path = location.hash.replace('#/', '').replace('#', '');
+    if (!path) path = 'README.md';
+    if (!path.endsWith('.md')) path += '.md';
+    loadFile(path);
+  }
+
+  // ─── Load File ────────────────────────────
+  async function loadFile(path) {
+    var body = document.getElementById('mdBody');
+    var breadcrumb = document.getElementById('mdBreadcrumb');
+    if (!body) return;
+
+    // Stop any playing audio
+    stopAllAudio();
+
+    state.currentFile = path;
+
+    // Loading state
+    body.innerHTML = '<div class="md-loading"><div class="md-spinner"></div> Loading...</div>';
+
+    // Breadcrumb
+    if (breadcrumb) {
+      var parts = path.split('/');
+      var crumbs = '<a href="#/">\ud83c\udfe0</a>';
+      parts.forEach(function(p, i) {
+        crumbs += ' <span class="separator">/</span> ';
+        if (i === parts.length - 1) {
+          crumbs += '<span>' + esc(p.replace('.md', '')) + '</span>';
+        } else {
+          crumbs += '<a href="#/' + parts.slice(0, i + 1).join('/') + '">' + esc(p) + '</a>';
+        }
+      });
+      breadcrumb.innerHTML = crumbs;
+    }
+
+    // Update active sidebar link
+    document.querySelectorAll('.md-nav-link').forEach(function(el) {
+      el.classList.toggle('active', el.dataset.path === path);
+      if (el.dataset.path === path) {
+        var folderEl = el.closest('.md-nav-section');
+        if (folderEl) {
+          var folderToggle = folderEl.querySelector('.md-nav-folder');
+          if (folderToggle) folderToggle.classList.add('open');
+        }
+      }
+    });
+
+    // Fetch file
+    try {
+      var url = RAW_BASE + '/' + state.owner + '/' + state.repo + '/' + state.branch + '/' + path;
+      var resp = await fetch(url);
+      if (!resp.ok) throw new Error(resp.status + ' \u2014 File not found');
+      var md = await resp.text();
+
+      // Render markdown
+      var html = marked.parse(md);
+      body.innerHTML = html;
+
+      // Build TOC
+      buildTOC();
+
+      // Scroll to top
+      window.scrollTo(0, 0);
+
+      // Close mobile sidebar
+      closeMobileSidebar();
+
+    } catch (e) {
+      body.innerHTML = '<div class="md-error"><p>\ud83d\udcc4 Could not load file</p><code>' + esc(path) + '</code><p style="margin-top:12px;font-size:0.8rem">' + esc(e.message) + '</p></div>';
+    }
+  }
+
+  // ─── Build TOC (in-page headers) ─────────
+  function buildTOC() {
+    var tocEl = document.getElementById('mdToc');
+    var body = document.getElementById('mdBody');
+    if (!tocEl || !body) return;
+
+    var headings = body.querySelectorAll('h2, h3, h4');
+    if (headings.length === 0) {
+      tocEl.innerHTML = '';
+      return;
+    }
+
+    var html = '<div class="md-toc-title">En esta p\u00e1gina</div><ul class="md-toc-list">';
+    headings.forEach(function(h, i) {
+      var id = 'heading-' + i;
+      h.id = id;
+      var depth = parseInt(h.tagName.charAt(1));
+      var text = h.textContent;
+      html += '<li><a class="md-toc-link depth-' + depth + '" href="#' + id + '" onclick="event.preventDefault(); document.getElementById(\'' + id + '\').scrollIntoView({behavior:\'smooth\'})">' + esc(text) + '</a></li>';
+    });
+    html += '</ul>';
+    tocEl.innerHTML = html;
+  }
+
+  // ─── Audio Player HTML ────────────────────
+  function buildAudioPlayerHTML(url, name) {
+    var id = 'audio-' + Math.random().toString(36).substr(2, 9);
+    return '<div class="md-audio-player" data-audio-id="' + id + '">' +
+      '<button class="md-audio-play-btn" onclick="MiData.toggleAudio(\'' + id + '\', \'' + url + '\')" aria-label="Play">\u25b6</button>' +
+      '<div class="md-audio-info">' +
+        '<div class="md-audio-title">' + esc(name) + '</div>' +
+        '<div class="md-audio-progress-wrap">' +
+          '<div class="md-audio-progress" onclick="MiData.seekAudio(event, \'' + id + '\')">' +
+            '<div class="md-audio-progress-bar" id="' + id + '-bar"></div>' +
+          '</div>' +
+          '<span class="md-audio-time" id="' + id + '-time">0:00 / 0:00</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  // ─── Audio Control ────────────────────────
+  var audioElements = {};
+
+  function toggleAudio(id, url) {
+    if (audioElements[id]) {
+      var audio = audioElements[id];
+      if (audio.paused) {
+        Object.keys(audioElements).forEach(function(k) {
+          if (k !== id && !audioElements[k].paused) {
+            audioElements[k].pause();
+            updatePlayBtn(k, false);
+          }
+        });
+        audio.play();
+        updatePlayBtn(id, true);
+      } else {
+        audio.pause();
+        updatePlayBtn(id, false);
+      }
+      return;
+    }
+
+    var audio = new Audio(url);
+    audioElements[id] = audio;
+
+    audio.addEventListener('timeupdate', function() {
+      var bar = document.getElementById(id + '-bar');
+      var timeEl = document.getElementById(id + '-time');
+      if (bar) bar.style.width = ((audio.currentTime / audio.duration) * 100) + '%';
+      if (timeEl) timeEl.textContent = fmt(audio.currentTime) + ' / ' + fmt(audio.duration);
+    });
+
+    audio.addEventListener('ended', function() {
+      updatePlayBtn(id, false);
+    });
+
+    Object.keys(audioElements).forEach(function(k) {
+      if (k !== id && !audioElements[k].paused) {
+        audioElements[k].pause();
+        updatePlayBtn(k, false);
+      }
+    });
+
+    audio.play();
+    updatePlayBtn(id, true);
+  }
+
+  function seekAudio(event, id) {
+    var audio = audioElements[id];
+    if (!audio) return;
+    var rect = event.currentTarget.getBoundingClientRect();
+    var pct = (event.clientX - rect.left) / rect.width;
+    audio.currentTime = pct * audio.duration;
+  }
+
+  function updatePlayBtn(id, playing) {
+    var player = document.querySelector('[data-audio-id="' + id + '"]');
+    if (!player) return;
+    var btn = player.querySelector('.md-audio-play-btn');
+    if (btn) btn.textContent = playing ? '\u23f8' : '\u25b6';
+  }
+
+  function stopAllAudio() {
+    Object.keys(audioElements).forEach(function(k) {
+      audioElements[k].pause();
+      audioElements[k].currentTime = 0;
+    });
+  }
+
+  function playAudioInline(url, name) {
+    var body = document.getElementById('mdBody');
+    if (!body) return;
+
+    var id = 'sidebar-audio-' + Math.random().toString(36).substr(2, 9);
+    var playerHTML = buildAudioPlayerHTML(url, name);
+
+    var existing = body.querySelector('.md-sidebar-audio-player');
+    if (existing) existing.remove();
+
+    var wrapper = document.createElement('div');
+    wrapper.className = 'md-sidebar-audio-player';
+    wrapper.innerHTML = playerHTML;
+    body.insertBefore(wrapper, body.firstChild);
+
+    setTimeout(function() { toggleAudio(id, url); }, 100);
+  }
+
+  // ─── Helpers ──────────────────────────────
+  function fmt(secs) {
+    if (isNaN(secs)) return '0:00';
+    var m = Math.floor(secs / 60);
+    var s = Math.floor(secs % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function esc(str) {
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function resolveUrl(href) {
+    if (href.startsWith('http')) return href;
+
+    var currentDir = state.currentFile.indexOf('/') !== -1
+      ? state.currentFile.split('/').slice(0, -1).join('/')
+      : '';
+
+    var resolved = currentDir ? currentDir + '/' + href : href;
+    return RAW_BASE + '/' + state.owner + '/' + state.repo + '/' + state.branch + '/' + resolved;
+  }
+
+  function closeMobileSidebar() {
+    var sidebar = document.getElementById('mdSidebar');
+    var overlay = document.getElementById('mdOverlay');
+    if (sidebar) sidebar.classList.remove('open');
+    if (overlay) overlay.classList.remove('active');
+  }
+
+  function setupMobileToggle() {
+    var toggle = document.getElementById('mdMenuToggle');
+    var sidebar = document.getElementById('mdSidebar');
+    var overlay = document.getElementById('mdOverlay');
+
+    if (toggle) {
+      toggle.addEventListener('click', function() {
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('active');
+      });
+    }
+
+    if (overlay) {
+      overlay.addEventListener('click', closeMobileSidebar);
+    }
+  }
+
+  // ─── Public API ───────────────────────────
+  window.MiData = {
+    init: init,
+    toggleAudio: toggleAudio,
+    seekAudio: seekAudio,
+  };
+
+  // Auto-init on DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();

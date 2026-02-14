@@ -1,5 +1,5 @@
 /**
- * MiData — MD Reader Engine
+ * MiData - MD Reader Engine
  * Renders .md files as a beautiful SPA on GitHub Pages
  * with cross-file navigation, sidebar, and audio player.
  *
@@ -11,129 +11,113 @@
 (function () {
   'use strict';
 
-  // ─── Config ────────────────────────────────
-  const GITHUB_API = 'https://api.github.com';
-  const RAW_BASE = 'https://raw.githubusercontent.com';
+  var GITHUB_API = 'https://api.github.com';
+  var RAW_BASE = 'https://raw.githubusercontent.com';
 
-  // ─── Marked.js Inline (minimal, no deps) ───
-  let markedLoaded = false;
+  var markedLoaded = false;
 
   function loadMarked() {
-    return new Promise((resolve, reject) => {
+    return new Promise(function(resolve, reject) {
       if (markedLoaded && window.marked) return resolve();
-      const s = document.createElement('script');
+      var s = document.createElement('script');
       s.src = 'https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js';
-      s.onload = () => { markedLoaded = true; resolve(); };
+      s.onload = function() { markedLoaded = true; resolve(); };
       s.onerror = reject;
       document.head.appendChild(s);
     });
   }
 
-  // ─── State ─────────────────────────────────
-  let state = {
+  var state = {
     repo: '',
     owner: '',
     branch: 'main',
     tree: [],
     currentFile: '',
     title: '',
-    sidebarOpen: false,
-    audioInstances: [],
+    sidebarOpen: false
   };
 
-  // ─── Init ──────────────────────────────────
   async function init() {
-    const root = document.getElementById('miData');
+    var root = document.getElementById('miData');
     if (!root) return console.error('[MiData] #miData element not found');
 
-    const dataRepo = root.dataset.repo;
+    var dataRepo = root.dataset.repo;
     if (!dataRepo) return console.error('[MiData] data-repo attribute required');
 
-    const [owner, repo] = dataRepo.split('/');
-    state.owner = owner;
-    state.repo = repo;
+    var parts = dataRepo.split('/');
+    state.owner = parts[0];
+    state.repo = parts[1];
     state.branch = root.dataset.branch || 'main';
-    state.title = root.dataset.title || repo;
+    state.title = root.dataset.title || parts[1];
 
-    // Build shell
     root.innerHTML = buildShell();
 
-    // Load marked.js
     await loadMarked();
     configureMarked();
 
-    // Fetch repo tree
     await fetchTree();
 
-    // Build sidebar
     renderSidebar();
 
-    // Route
     handleRoute();
     window.addEventListener('hashchange', handleRoute);
 
-    // Mobile toggle
     setupMobileToggle();
   }
 
-  // ─── Shell HTML ────────────────────────────
   function buildShell() {
-    return `
-      <button class="md-menu-toggle" id="mdMenuToggle" aria-label="Menu">\u2630</button>
-      <div class="md-overlay" id="mdOverlay"></div>
-      <aside class="md-sidebar" id="mdSidebar">
-        <div class="md-sidebar-header">
-          <a href="#/" class="md-sidebar-title">
-            <span class="logo">\ud83d\udcc4</span>
-            <span>${esc(state.title)}</span>
-          </a>
-        </div>
-        <nav class="md-nav" id="mdNav"></nav>
-        <div class="md-toc" id="mdToc"></div>
-      </aside>
-      <main class="md-content">
-        <div class="md-content-inner">
-          <div class="md-breadcrumb" id="mdBreadcrumb"></div>
-          <article class="md-body" id="mdBody">
-            <div class="md-loading"><div class="md-spinner"></div> Loading...</div>
-          </article>
-          <footer class="md-footer">
-            Powered by <a href="https://github.com/imLeGEnDco55/MiData" target="_blank">MiData</a>
-          </footer>
-        </div>
-      </main>
-    `;
+    var t = state.title;
+    var h = '';
+    h += '<button class="md-menu-toggle" id="mdMenuToggle" aria-label="Menu">&#9776;</button>';
+    h += '<div class="md-overlay" id="mdOverlay"></div>';
+    h += '<aside class="md-sidebar" id="mdSidebar">';
+    h += '<div class="md-sidebar-header">';
+    h += '<a href="#/" class="md-sidebar-title">';
+    h += '<span class="logo">&#128196;</span>';
+    h += '<span>' + esc(t) + '</span>';
+    h += '</a></div>';
+    h += '<nav class="md-nav" id="mdNav"></nav>';
+    h += '<div class="md-toc" id="mdToc"></div>';
+    h += '</aside>';
+    h += '<main class="md-content"><div class="md-content-inner">';
+    h += '<div class="md-breadcrumb" id="mdBreadcrumb"></div>';
+    h += '<article class="md-body" id="mdBody">';
+    h += '<div class="md-loading"><div class="md-spinner"></div> Loading...</div>';
+    h += '</article>';
+    h += '<footer class="md-footer">';
+    h += 'Powered by <a href="https://github.com/imLeGEnDco55/MiData" target="_blank">MiData</a>';
+    h += '</footer></div></main>';
+    return h;
   }
 
-  // ─── Configure Marked ─────────────────────
   function configureMarked() {
     if (!window.marked) return;
 
-    const renderer = new marked.Renderer();
+    var renderer = new marked.Renderer();
 
-    // Custom link renderer — detect audio files
-    renderer.link = function ({ href, title, text }) {
-      // Check if it's an audio file
+    renderer.link = function (data) {
+      var href = data.href;
+      var title = data.title;
+      var text = data.text;
+
       if (href && /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(href)) {
-        const audioUrl = resolveUrl(href);
-        const displayName = text || href.split('/').pop();
+        var audioUrl = resolveUrl(href);
+        var displayName = text || href.split('/').pop();
         return buildAudioPlayerHTML(audioUrl, displayName);
       }
 
-      // Check if it's a .md link (cross-file navigation)
       if (href && /\.md$/i.test(href) && !href.startsWith('http')) {
-        const hashPath = href.startsWith('/') ? href : '/' + href;
+        var hashPath = href.startsWith('/') ? href : '/' + href;
         return '<a href="#' + hashPath + '">' + text + '</a>';
       }
 
-      // External links
       var targetAttr = href && href.startsWith('http') ? ' target="_blank" rel="noopener"' : '';
       var titleAttr = title ? ' title="' + esc(title) + '"' : '';
       return '<a href="' + href + '"' + titleAttr + targetAttr + '>' + text + '</a>';
     };
 
-    // Checkbox support for task lists
-    renderer.listitem = function ({ text }) {
+    renderer.listitem = function (data) {
+      var text = data.text;
       if (text.startsWith('<input')) {
         return '<li style="list-style:none;margin-left:-1.5em">' + text + '</li>\n';
       }
@@ -147,12 +131,12 @@
     });
   }
 
-  // ─── Fetch Repo Tree ──────────────────────
   async function fetchTree() {
     try {
-      const resp = await fetch(GITHUB_API + '/repos/' + state.owner + '/' + state.repo + '/git/trees/' + state.branch + '?recursive=1');
+      var url = GITHUB_API + '/repos/' + state.owner + '/' + state.repo + '/git/trees/' + state.branch + '?recursive=1';
+      var resp = await fetch(url);
       if (!resp.ok) throw new Error('GitHub API: ' + resp.status);
-      const data = await resp.json();
+      var data = await resp.json();
       state.tree = data.tree || [];
     } catch (e) {
       console.error('[MiData] Failed to fetch tree:', e);
@@ -160,7 +144,6 @@
     }
   }
 
-  // ─── Render Sidebar ───────────────────────
   function renderSidebar() {
     var nav = document.getElementById('mdNav');
     if (!nav) return;
@@ -192,51 +175,46 @@
 
     var html = '';
 
-    // Root files
     if (rootFiles.length) {
       html += '<div class="md-nav-root">';
       rootFiles.forEach(function(f) {
         var name = f.path.replace('.md', '');
-        var displayName = name === 'README' ? '\ud83c\udfe0 Home' : name;
-        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">\ud83d\udcdd</span> ' + esc(displayName) + '</a></div>';
+        var displayName = name === 'README' ? '&#127968; Home' : name;
+        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">&#128221;</span> ' + esc(displayName) + '</a></div>';
       });
       html += '</div>';
     }
 
-    // Folder sections
     Object.keys(structure).sort().forEach(function(folder) {
       var files = structure[folder];
       html += '<div class="md-nav-section">';
-      html += '<div class="md-nav-folder" data-folder="' + folder + '">\ud83d\udcc1 ' + esc(folder) + '</div>';
+      html += '<div class="md-nav-folder" data-folder="' + folder + '">&#128193; ' + esc(folder) + '</div>';
       html += '<div class="md-nav-items">';
       files.forEach(function(f) {
         var name = f.path.split('/').pop().replace('.md', '');
-        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">\ud83d\udcdd</span> ' + esc(name) + '</a></div>';
+        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">&#128221;</span> ' + esc(name) + '</a></div>';
       });
       html += '</div></div>';
     });
 
-    // Audio folders
     Object.keys(audioFolders).sort().forEach(function(folder) {
       var files = audioFolders[folder];
       html += '<div class="md-nav-section">';
-      html += '<div class="md-nav-folder" data-folder="' + folder + '">\ud83c\udfb5 ' + esc(folder) + '</div>';
+      html += '<div class="md-nav-folder" data-folder="' + folder + '">&#127925; ' + esc(folder) + '</div>';
       html += '<div class="md-nav-items">';
       files.forEach(function(f) {
         var name = f.path.split('/').pop();
-        html += '<div class="md-nav-item"><a class="md-nav-link md-audio-sidebar-link" href="#" data-audio="' + f.path + '"><span class="icon">\ud83c\udfb5</span> ' + esc(name) + '</a></div>';
+        html += '<div class="md-nav-item"><a class="md-nav-link md-audio-sidebar-link" href="#" data-audio="' + f.path + '"><span class="icon">&#127925;</span> ' + esc(name) + '</a></div>';
       });
       html += '</div></div>';
     });
 
     nav.innerHTML = html;
 
-    // Folder toggle
     nav.querySelectorAll('.md-nav-folder').forEach(function(el) {
       el.addEventListener('click', function() { el.classList.toggle('open'); });
     });
 
-    // Audio sidebar links
     nav.querySelectorAll('.md-audio-sidebar-link').forEach(function(el) {
       el.addEventListener('click', function(e) {
         e.preventDefault();
@@ -248,7 +226,6 @@
     });
   }
 
-  // ─── Routing ──────────────────────────────
   function handleRoute() {
     var path = location.hash.replace('#/', '').replace('#', '');
     if (!path) path = 'README.md';
@@ -256,24 +233,19 @@
     loadFile(path);
   }
 
-  // ─── Load File ────────────────────────────
   async function loadFile(path) {
     var body = document.getElementById('mdBody');
     var breadcrumb = document.getElementById('mdBreadcrumb');
     if (!body) return;
 
-    // Stop any playing audio
     stopAllAudio();
-
     state.currentFile = path;
 
-    // Loading state
     body.innerHTML = '<div class="md-loading"><div class="md-spinner"></div> Loading...</div>';
 
-    // Breadcrumb
     if (breadcrumb) {
       var parts = path.split('/');
-      var crumbs = '<a href="#/">\ud83c\udfe0</a>';
+      var crumbs = '<a href="#/">&#127968;</a>';
       parts.forEach(function(p, i) {
         crumbs += ' <span class="separator">/</span> ';
         if (i === parts.length - 1) {
@@ -285,44 +257,35 @@
       breadcrumb.innerHTML = crumbs;
     }
 
-    // Update active sidebar link
     document.querySelectorAll('.md-nav-link').forEach(function(el) {
       el.classList.toggle('active', el.dataset.path === path);
       if (el.dataset.path === path) {
-        var folderEl = el.closest('.md-nav-section');
-        if (folderEl) {
-          var folderToggle = folderEl.querySelector('.md-nav-folder');
-          if (folderToggle) folderToggle.classList.add('open');
+        var sec = el.closest('.md-nav-section');
+        if (sec) {
+          var ft = sec.querySelector('.md-nav-folder');
+          if (ft) ft.classList.add('open');
         }
       }
     });
 
-    // Fetch file
     try {
       var url = RAW_BASE + '/' + state.owner + '/' + state.repo + '/' + state.branch + '/' + path;
       var resp = await fetch(url);
-      if (!resp.ok) throw new Error(resp.status + ' \u2014 File not found');
+      if (!resp.ok) throw new Error(resp.status + ' - File not found');
       var md = await resp.text();
 
-      // Render markdown
       var html = marked.parse(md);
       body.innerHTML = html;
 
-      // Build TOC
       buildTOC();
-
-      // Scroll to top
       window.scrollTo(0, 0);
-
-      // Close mobile sidebar
       closeMobileSidebar();
 
     } catch (e) {
-      body.innerHTML = '<div class="md-error"><p>\ud83d\udcc4 Could not load file</p><code>' + esc(path) + '</code><p style="margin-top:12px;font-size:0.8rem">' + esc(e.message) + '</p></div>';
+      body.innerHTML = '<div class="md-error"><p>&#128196; Could not load file</p><code>' + esc(path) + '</code><p style="margin-top:12px;font-size:0.8rem">' + esc(e.message) + '</p></div>';
     }
   }
 
-  // ─── Build TOC (in-page headers) ─────────
   function buildTOC() {
     var tocEl = document.getElementById('mdToc');
     var body = document.getElementById('mdBody');
@@ -334,7 +297,7 @@
       return;
     }
 
-    var html = '<div class="md-toc-title">En esta p\u00e1gina</div><ul class="md-toc-list">';
+    var html = '<div class="md-toc-title">On this page</div><ul class="md-toc-list">';
     headings.forEach(function(h, i) {
       var id = 'heading-' + i;
       h.id = id;
@@ -346,24 +309,22 @@
     tocEl.innerHTML = html;
   }
 
-  // ─── Audio Player HTML ────────────────────
   function buildAudioPlayerHTML(url, name) {
     var id = 'audio-' + Math.random().toString(36).substr(2, 9);
-    return '<div class="md-audio-player" data-audio-id="' + id + '">' +
-      '<button class="md-audio-play-btn" onclick="MiData.toggleAudio(\'' + id + '\', \'' + url + '\')" aria-label="Play">\u25b6</button>' +
-      '<div class="md-audio-info">' +
-        '<div class="md-audio-title">' + esc(name) + '</div>' +
-        '<div class="md-audio-progress-wrap">' +
-          '<div class="md-audio-progress" onclick="MiData.seekAudio(event, \'' + id + '\')">' +
-            '<div class="md-audio-progress-bar" id="' + id + '-bar"></div>' +
-          '</div>' +
-          '<span class="md-audio-time" id="' + id + '-time">0:00 / 0:00</span>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
+    var h = '';
+    h += '<div class="md-audio-player" data-audio-id="' + id + '">';
+    h += '<button class="md-audio-play-btn" onclick="MiData.toggleAudio(\'' + id + '\', \'' + url + '\')" aria-label="Play">&#9654;</button>';
+    h += '<div class="md-audio-info">';
+    h += '<div class="md-audio-title">' + esc(name) + '</div>';
+    h += '<div class="md-audio-progress-wrap">';
+    h += '<div class="md-audio-progress" onclick="MiData.seekAudio(event, \'' + id + '\')">';
+    h += '<div class="md-audio-progress-bar" id="' + id + '-bar"></div>';
+    h += '</div>';
+    h += '<span class="md-audio-time" id="' + id + '-time">0:00 / 0:00</span>';
+    h += '</div></div></div>';
+    return h;
   }
 
-  // ─── Audio Control ────────────────────────
   var audioElements = {};
 
   function toggleAudio(id, url) {
@@ -422,7 +383,7 @@
     var player = document.querySelector('[data-audio-id="' + id + '"]');
     if (!player) return;
     var btn = player.querySelector('.md-audio-play-btn');
-    if (btn) btn.textContent = playing ? '\u23f8' : '\u25b6';
+    if (btn) btn.textContent = playing ? '\u23F8' : '\u25B6';
   }
 
   function stopAllAudio() {
@@ -450,7 +411,6 @@
     setTimeout(function() { toggleAudio(id, url); }, 100);
   }
 
-  // ─── Helpers ──────────────────────────────
   function fmt(secs) {
     if (isNaN(secs)) return '0:00';
     var m = Math.floor(secs / 60);
@@ -466,11 +426,9 @@
 
   function resolveUrl(href) {
     if (href.startsWith('http')) return href;
-
     var currentDir = state.currentFile.indexOf('/') !== -1
       ? state.currentFile.split('/').slice(0, -1).join('/')
       : '';
-
     var resolved = currentDir ? currentDir + '/' + href : href;
     return RAW_BASE + '/' + state.owner + '/' + state.repo + '/' + state.branch + '/' + resolved;
   }
@@ -499,14 +457,12 @@
     }
   }
 
-  // ─── Public API ───────────────────────────
   window.MiData = {
     init: init,
     toggleAudio: toggleAudio,
-    seekAudio: seekAudio,
+    seekAudio: seekAudio
   };
 
-  // Auto-init on DOM ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {

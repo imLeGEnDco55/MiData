@@ -95,6 +95,14 @@
 
     var renderer = new marked.Renderer();
 
+    renderer.image = function (data) {
+      var href = data.href || '';
+      var title = data.title || '';
+      var text = data.text || '';
+      var titleAttr = title ? ' title="' + esc(title) + '"' : '';
+      return '<img src="' + href + '" alt="' + esc(text) + '"' + titleAttr + ' style="max-width:100%;vertical-align:middle">';
+    };
+
     renderer.link = function (data) {
       var href = data.href;
       var title = data.title;
@@ -113,6 +121,7 @@
 
       var targetAttr = href && href.startsWith('http') ? ' target="_blank" rel="noopener"' : '';
       var titleAttr = title ? ' title="' + esc(title) + '"' : '';
+      if (!href) return '<span>' + text + '</span>';
       return '<a href="' + href + '"' + titleAttr + targetAttr + '>' + text + '</a>';
     };
 
@@ -179,8 +188,10 @@
       html += '<div class="md-nav-root">';
       rootFiles.forEach(function(f) {
         var name = f.path.replace('.md', '');
-        var displayName = name === 'README' ? '&#127968; Home' : name;
-        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">&#128221;</span> ' + esc(displayName) + '</a></div>';
+        var isReadme = (name === 'README');
+        var displayName = isReadme ? 'Home' : name;
+        var icon = isReadme ? '&#127968;' : '&#128221;';
+        html += '<div class="md-nav-item"><a class="md-nav-link" href="#/' + f.path + '" data-path="' + f.path + '"><span class="icon">' + icon + '</span> ' + esc(displayName) + '</a></div>';
       });
       html += '</div>';
     }

@@ -286,6 +286,8 @@
       var md = await resp.text();
 
       var html = marked.parse(md);
+      // Post-process: fix any raw ![alt](url) that marked didn't parse
+      html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;vertical-align:middle">');
       body.innerHTML = html;
 
       buildTOC();
